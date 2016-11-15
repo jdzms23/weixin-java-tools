@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.lianshang.common.utils.lock.Lock;
 import me.chanjar.weixin.common.bean.WxAccessToken;
 import me.chanjar.weixin.common.bean.WxJsapiSignature;
 import me.chanjar.weixin.common.bean.result.WxError;
@@ -28,6 +29,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.concurrent.TimeUnit;
 
 public class WxMpServiceImpl implements WxMpService {
 
@@ -390,39 +392,47 @@ public class WxMpServiceImpl implements WxMpService {
     throw new RuntimeException("微信服务端异常，超出重试次数");
   }
 
-  protected synchronized <T, E> T executeInternal(RequestExecutor<T, E> executor, String uri, E data) throws WxErrorException {
+  protected <T, E> T executeInternal(RequestExecutor<T, E> executor, String uri, E data) throws WxErrorException {
     if (uri.indexOf("access_token=") != -1) {
       throw new IllegalArgumentException("uri参数中不允许有access_token: " + uri);
     }
-    String accessToken = getAccessToken(false);
+    Lock lock = new Lock("wechat", "WechatApp" + configStorage.getAppId() + "AccessToken");
 
-    String uriWithAccessToken = uri;
-    uriWithAccessToken += uri.indexOf('?') == -1 ? "?access_token=" + accessToken : "&access_token=" + accessToken;
+    if (lock.acquire(2000, TimeUnit.MILLISECONDS)) {
+      try {
+        String accessToken = getAccessToken(false);
 
-    try {
-      return executor.execute(getHttpclient(), this.httpProxy, uriWithAccessToken, data);
-    } catch (WxErrorException e) {
-      WxError error = e.getError();
+        String uriWithAccessToken = uri;
+        uriWithAccessToken += uri.indexOf('?') == -1 ? "?access_token=" + accessToken : "&access_token=" + accessToken;
+
+        return executor.execute(getHttpclient(), this.httpProxy, uriWithAccessToken, data);
+      } catch (WxErrorException e) {
+        WxError error = e.getError();
       /*
        * 发生以下情况时尝试刷新access_token
        * 40001 获取access_token时AppSecret错误，或者access_token无效
        * 42001 access_token超时
        */
-      if (error.getErrorCode() == 42001 || error.getErrorCode() == 40001) {
-        // 强制设置wxMpConfigStorage它的access token过期了，这样在下一次请求里就会刷新access token
-        this.configStorage.expireAccessToken();
-        return this.execute(executor, uri, data);
-      }
-      if (error.getErrorCode() != 0) {
-        this.log.error("\n[URL]:  {}\n[PARAMS]: {}\n[RESPONSE]: {}", uri, data,
+        if (error.getErrorCode() == 42001 || error.getErrorCode() == 40001) {
+          // 强制设置wxMpConfigStorage它的access token过期了，这样在下一次请求里就会刷新access token
+          this.configStorage.expireAccessToken();
+          return this.execute(executor, uri, data);
+        }
+        if (error.getErrorCode() != 0) {
+          this.log.error("\n[URL]:  {}\n[PARAMS]: {}\n[RESPONSE]: {}", uri, data,
             error);
-        throw new WxErrorException(error);
+          throw new WxErrorException(error);
+        }
+        return null;
+      } catch (IOException e) {
+        this.log.error("\n[URL]:  {}\n[PARAMS]: {}\n[EXCEPTION]: {}", uri, data, e.getMessage());
+        throw new RuntimeException(e);
+      } finally {
+        lock.release();
+        this.log.info("lock realse");
       }
-      return null;
-    } catch (IOException e) {
-      this.log.error("\n[URL]:  {}\n[PARAMS]: {}\n[EXCEPTION]: {}", uri, data, e.getMessage());
-      throw new RuntimeException(e);
     }
+    return null;
   }
 
   @Override
