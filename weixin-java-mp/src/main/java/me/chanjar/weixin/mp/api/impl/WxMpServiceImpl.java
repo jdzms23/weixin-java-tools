@@ -148,15 +148,24 @@ public class WxMpServiceImpl implements WxMpService {
     }
 
     if (this.configStorage.isJsapiTicketExpired()) {
-      synchronized (this.globalJsapiTicketRefreshLock) {
-        if (this.configStorage.isJsapiTicketExpired()) {
-          String url = "https://api.weixin.qq.com/cgi-bin/ticket/getticket?type=jsapi";
-          String responseContent = execute(new SimpleGetRequestExecutor(), url, null);
-          JsonElement tmpJsonElement = JSON_PARSER.parse(responseContent);
-          JsonObject tmpJsonObject = tmpJsonElement.getAsJsonObject();
-          String jsapiTicket = tmpJsonObject.get("ticket").getAsString();
-          int expiresInSeconds = tmpJsonObject.get("expires_in").getAsInt();
-          this.configStorage.updateJsapiTicket(jsapiTicket, expiresInSeconds);
+      Lock lock = new Lock("wechat", "WechatApp" + configStorage.getAppId() + "JsapiTicket");
+
+      if (lock.acquire(2000, TimeUnit.MILLISECONDS)) {
+        try {
+          if (this.configStorage.isJsapiTicketExpired()) {
+            String url = "https://api.weixin.qq.com/cgi-bin/ticket/getticket?type=jsapi";
+            String responseContent = execute(new SimpleGetRequestExecutor(), url, null);
+            JsonElement tmpJsonElement = JSON_PARSER.parse(responseContent);
+            JsonObject tmpJsonObject = tmpJsonElement.getAsJsonObject();
+            String jsapiTicket = tmpJsonObject.get("ticket").getAsString();
+            int expiresInSeconds = tmpJsonObject.get("expires_in").getAsInt();
+            this.configStorage.updateJsapiTicket(jsapiTicket, expiresInSeconds);
+          }
+        } catch (Exception e) {
+          e.printStackTrace();
+        } finally {
+          lock.release();
+          this.log.info("lock realse");
         }
       }
     }
